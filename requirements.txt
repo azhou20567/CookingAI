@@ -3,3 +3,8 @@ anthropic>=0.40
 pydantic>=2.0
 youtube-transcript-api>=1.0,<2.0
 python-dotenv
+gunicorn
+whitenoise
+dj-database-url
+psycopg[binary]>=3.1
+django-ratelimit

@@ -1,0 +1,25 @@
+{% extends "recipes/base.html" %}
+
+{% block title %}Too many requests - CookingAI{% endblock %}
+
+{% block head_extra %}
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+{% endblock %}
+
+{% block body %}
+    <div class="container mt-5">
+        <a href="{% url 'home' %}" class="btn btn-secondary mb-3">Home</a>
+        <div class="alert alert-warning">
+            <h1 class="h4">Slow down a sec</h1>
+            <p class="mb-2">
+                You&rsquo;ve hit the daily generation limit ({{ rate }} per IP).
+                This keeps the API bill bounded since CookingAI is a personal project.
+            </p>
+            <p class="mb-0">
+                The counter resets at midnight UTC. In the meantime, the
+                <a href="{% url 'home' %}#examples">featured examples</a> and any recipes
+                you&rsquo;ve already generated are still freely browsable.
+            </p>
+        </div>
+    </div>
+{% endblock %}

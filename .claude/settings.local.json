@@ -19,7 +19,8 @@
       "Bash(.venv/Scripts/python.exe -m pip install -r requirements.txt)",
       "Bash(../.venv/Scripts/python.exe manage.py migrate)",
       "Bash(../.venv/Scripts/python.exe manage.py seed_examples)",
-      "Bash(../.venv/Scripts/python.exe -c ' *)"
+      "Bash(../.venv/Scripts/python.exe -c ' *)",
+      "Bash(../.venv/Scripts/python.exe manage.py check)"
     ]
   }
 }

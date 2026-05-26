@@ -1,7 +1,8 @@
 import os
 from unittest.mock import Mock, patch
 
-from django.test import RequestFactory, TestCase
+from django.core.cache import cache
+from django.test import RequestFactory, TestCase, override_settings
 from django.urls import reverse
 
 from recipes.forms import YoutubeLinkForm, extract_video_id
@@ -152,6 +153,7 @@ class YoutubeFormViewTests(TestCase):
         self.assertIn('valid YouTube URL', response.content.decode())
 
 
+@override_settings(RATELIMIT_ENABLE=False)
 class RecipeResultViewTests(TestCase):
     def setUp(self):
         self.factory = RequestFactory()
@@ -272,6 +274,7 @@ class DefaultGeneratorTests(TestCase):
                 default_generator()
 
 
+@override_settings(RATELIMIT_ENABLE=False)
 class LocalDevSmokeTests(TestCase):
     """End-to-end walk of the local-run flow: home -> submit -> result.
 
@@ -303,3 +306,77 @@ class LocalDevSmokeTests(TestCase):
             self.assertEqual(result_response.status_code, 200)
             self.assertIn('Fake Test Recipe', result_response.content.decode())
             self.assertTrue(Recipe.objects.filter(video_id=VALID_ID).exists())
+
+
+class RateLimitTests(TestCase):
+    """Verify the per-IP rate limit on cache-miss generation.
+
+    Uses RATELIMIT_ENABLE=True (the production default). Each test clears the
+    cache in setUp so the bucket starts fresh; without that, ordering between
+    tests would leak counters and produce flaky results.
+    """
+
+    def setUp(self):
+        cache.clear()
+        self.factory = RequestFactory()
+
+    def _request(self, video_id):
+        # Set a stable client IP so the rate limit key is deterministic across calls.
+        return self.factory.get(f'/results/{video_id}/', REMOTE_ADDR='1.2.3.4')
+
+    @override_settings(RATELIMIT_ENABLE=True)
+    def test_429_returned_after_limit_exceeded(self):
+        """The 4th cache-miss in a day from one IP gets 429, not a fresh generation."""
+        from recipes.views import recipe_result_view
+
+        # First three cache-misses succeed (each video_id is unique).
+        for i, vid in enumerate(['aaaaaaaaaaa', 'bbbbbbbbbbb', 'ccccccccccc']):
+            response = recipe_result_view(
+                self._request(vid), vid, generator=FakeRecipeGenerator()
+            )
+            self.assertEqual(response.status_code, 200, f'call {i + 1} should succeed')
+
+        # Fourth cache-miss is over the 3/d limit.
+        response = recipe_result_view(
+            self._request('ddddddddddd'),
+            'ddddddddddd',
+            generator=FakeRecipeGenerator(),
+        )
+        self.assertEqual(response.status_code, 429)
+        self.assertContains(response, 'Slow down', status_code=429)
+        # The over-limit request didn't persist a Recipe.
+        self.assertFalse(Recipe.objects.filter(video_id='ddddddddddd').exists())
+
+    @override_settings(RATELIMIT_ENABLE=True)
+    def test_cache_hits_do_not_count_against_limit(self):
+        """Browsing already-cached recipes is free — the limit only gates new generation."""
+        from recipes.views import recipe_result_view
+
+        # Pre-cache a recipe.
+        Recipe.objects.create(
+            video_id=VALID_ID,
+            title='Cached',
+            payload=FakeRecipeGenerator.DEFAULT_PAYLOAD,
+        )
+
+        # Hit it 10 times — all cache hits, none should bump the counter.
+        for _ in range(10):
+            response = recipe_result_view(
+                self._request(VALID_ID), VALID_ID, generator=FakeRecipeGenerator()
+            )
+            self.assertEqual(response.status_code, 200)
+
+        # Now do 3 cache-misses (the actual daily allowance).
+        for vid in ['aaaaaaaaaaa', 'bbbbbbbbbbb', 'ccccccccccc']:
+            response = recipe_result_view(
+                self._request(vid), vid, generator=FakeRecipeGenerator()
+            )
+            self.assertEqual(response.status_code, 200)
+
+        # The 4th miss is rate-limited — meaning the 10 prior cache hits really did not count.
+        response = recipe_result_view(
+            self._request('ddddddddddd'),
+            'ddddddddddd',
+            generator=FakeRecipeGenerator(),
+        )
+        self.assertEqual(response.status_code, 429)

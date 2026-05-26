@@ -13,6 +13,7 @@ https://docs.djangoproject.com/en/5.1/ref/settings/
 import os
 from pathlib import Path
 
+import dj_database_url
 from dotenv import load_dotenv
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
@@ -32,6 +33,23 @@ DEBUG = os.environ.get('DEBUG', 'true').lower() == 'true'
 
 ALLOWED_HOSTS = [h.strip() for h in os.environ.get('ALLOWED_HOSTS', '127.0.0.1,localhost').split(',') if h.strip()]
 
+# CSRF: trust HTTPS origins for any non-local host (the Render URL, custom domain, etc.).
+CSRF_TRUSTED_ORIGINS = [
+    f'https://{host}' for host in ALLOWED_HOSTS
+    if host not in ('127.0.0.1', 'localhost')
+]
+
+# Production-only security. Render terminates SSL at its edge proxy, so Django
+# needs the X-Forwarded-Proto hint to recognize HTTPS requests.
+if not DEBUG:
+    SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+    SECURE_SSL_REDIRECT = True
+    SESSION_COOKIE_SECURE = True
+    CSRF_COOKIE_SECURE = True
+
+# Rate limiting (django-ratelimit). Default on; tests turn it off via override_settings.
+RATELIMIT_ENABLE = os.environ.get('RATELIMIT_ENABLE', 'true').lower() == 'true'
+
 
 # Application definition
 
@@ -47,6 +65,7 @@ INSTALLED_APPS = [
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
+    'whitenoise.middleware.WhiteNoiseMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
@@ -76,14 +95,13 @@ TEMPLATES = [
 WSGI_APPLICATION = 'cookingai.wsgi.application'
 
 
-# Database
-# https://docs.djangoproject.com/en/5.1/ref/settings/#databases
-
+# Database — DATABASE_URL (Postgres in prod) with SQLite fallback for local dev.
 DATABASES = {
-    'default': {
-        'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': BASE_DIR / 'db.sqlite3',
-    }
+    'default': dj_database_url.config(
+        default=f'sqlite:///{BASE_DIR / "db.sqlite3"}',
+        conn_max_age=600,
+        conn_health_checks=True,
+    )
 }
 
 
@@ -123,6 +141,17 @@ USE_TZ = True
 
 STATIC_URL = 'static/'
 STATIC_ROOT = BASE_DIR / 'staticfiles'
+
+# WhiteNoise serves static files in production. Compressed-manifest backend
+# fingerprints filenames for far-future caching; collectstatic populates it.
+STORAGES = {
+    'default': {'BACKEND': 'django.core.files.storage.FileSystemStorage'},
+    # Compressed (gzip + brotli) but not manifest-hashed — manifest backend
+    # requires collectstatic to have run and the test runner forces DEBUG=False,
+    # so it activates in tests and breaks template rendering. The cache-busting
+    # win from fingerprinted filenames is minor for this app's tiny static set.
+    'staticfiles': {'BACKEND': 'whitenoise.storage.CompressedStaticFilesStorage'},
+}
 
 # Default primary key field type
 # https://docs.djangoproject.com/en/5.1/ref/settings/#default-auto-field
