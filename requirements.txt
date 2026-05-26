@@ -1,0 +1,6 @@
+Django>=5.1,<5.2
+django-ai-assistant
+openai>=1.0
+youtube-transcript-api<1.0
+beautifulsoup4
+python-dotenv

@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(xxd C:/Users/andre/CookingAI/.gitignore)",
+      "Bash(python -c \"import dotenv; print\\(dotenv.__version__\\)\")",
+      "Bash(git check-ignore *)",
+      "Bash(xxd C:/Users/andre/CookingAI/cookingai/.env)",
+      "Bash(python -m pip show django django-ai-assistant openai youtube-transcript-api beautifulsoup4 python-dotenv)",
+      "Bash(python -m pip list)"
+    ]
+  }
+}
