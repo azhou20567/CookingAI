@@ -1,17 +1,12 @@
-import json
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from dataclasses import dataclass
 from typing import Protocol
 
-from openai import OpenAI, OpenAIError
-from youtube_transcript_api import (
-    YouTubeTranscriptApi,
-    TranscriptsDisabled,
-    NoTranscriptFound,
-    VideoUnavailable,
-)
+import anthropic
+from pydantic import BaseModel
+from youtube_transcript_api import YouTubeTranscriptApi, CouldNotRetrieveTranscript
 
-OPENAI_TIMEOUT_S = 30.0
+ANTHROPIC_TIMEOUT_S = 120.0
 TRANSCRIPT_TIMEOUT_S = 30.0
 
 
@@ -27,6 +22,47 @@ class GenerationFailed(GeneratorError):
     """The LLM call failed or returned output that could not be parsed."""
 
 
+# ---- Recipe schema (Pydantic) ---------------------------------------------
+# The Anthropic API enforces this schema server-side via output_format on
+# messages.parse(), so we don't need a runtime validate_payload anymore.
+# The template reads recipe.data.title, recipe.ingredients, etc., so the
+# JSON shape from model_dump() is the source of truth for the rendered page.
+
+class RecipeData(BaseModel):
+    title: str
+    source: str = ''
+    servings: str = ''
+    prep_time: str = ''
+    cook_time: str = ''
+    cuisine: str = ''
+
+
+class Ingredient(BaseModel):
+    name: str
+    amount: str = ''
+    unit: str = ''
+    notes: str = ''
+
+
+class Instruction(BaseModel):
+    step: int
+    description: str
+    tips: str = ''
+
+
+class RecipeNotes(BaseModel):
+    serving_suggestions: str = ''
+    storage: str = ''
+    variations: str = ''
+
+
+class RecipeSchema(BaseModel):
+    data: RecipeData
+    ingredients: list[Ingredient]
+    instructions: list[Instruction]
+    notes: RecipeNotes
+
+
 @dataclass(frozen=True)
 class GeneratedRecipe:
     video_id: str
@@ -38,71 +74,30 @@ class RecipeGenerator(Protocol):
     def generate(self, video_id: str) -> GeneratedRecipe: ...
 
 
-def validate_payload(payload: object) -> None:
-    """Raise GenerationFailed if the LLM JSON doesn't match the shape the template needs."""
-    if not isinstance(payload, dict):
-        raise GenerationFailed('payload is not a JSON object')
-    data = payload.get('data')
-    if not isinstance(data, dict):
-        raise GenerationFailed('payload.data is missing or not an object')
-    if not data.get('title'):
-        raise GenerationFailed('payload.data.title is missing or empty')
-    if not isinstance(payload.get('ingredients'), list):
-        raise GenerationFailed('payload.ingredients is missing or not a list')
-    if not isinstance(payload.get('instructions'), list):
-        raise GenerationFailed('payload.instructions is missing or not a list')
-
-
-_PROMPT_TEMPLATE = """\
-Create a recipe based on the following video transcript. The recipe should include a list of ingredients with measurements, cooking methods, and any tips or variations.
-Ensure the output is in JSON format with clear structure and no additional text.
-
-Output format (JSON):
-{{
-    "data": {{
-        "title": "[recipe title]",
-        "source": "[YouTube video URL or name]",
-        "servings": "[number of servings]",
-        "prep_time": "[preparation time]",
-        "cook_time": "[cooking time]",
-        "cuisine": "[type of cuisine]"
-    }},
-    "ingredients": [
-        {{"name": "[ingredient name]", "amount": "[quantity]", "unit": "[measurement unit]", "notes": "[optional preparation notes]"}}
-    ],
-    "instructions": [
-        {{"step": [step number], "description": "[detailed cooking instruction]", "tips": "[optional tips or variations]"}}
-    ],
-    "notes": {{
-        "serving_suggestions": "[how to serve the dish]",
-        "storage": "[storage instructions]",
-        "variations": "[optional ingredient substitutions or variations]"
-    }}
-}}
-
-Transcript:
-{transcript}
-"""
-
 _SYSTEM_PROMPT = (
-    "You are an expert cooking assistant specializing in analyzing and creating recipes. "
-    "Generate recipe ideas based on user input and video transcripts, including ingredients, "
-    "measurements, cooking methods, and tips. "
-    "Please ensure the output is in JSON format, with clear structure and no additional text."
+    'You are an expert cooking assistant. Given a YouTube cooking-video transcript, '
+    'extract a structured recipe: ingredients with measurements, ordered cooking '
+    'instructions, and useful notes (serving, storage, variations). When the transcript '
+    'is ambiguous about quantities or timing, infer reasonable defaults from culinary '
+    'context rather than leaving fields empty.'
 )
 
 
-def _fetch_transcript(video_id: str, timeout: float = TRANSCRIPT_TIMEOUT_S) -> list:
+def _fetch_transcript(video_id: str, timeout: float = TRANSCRIPT_TIMEOUT_S) -> list[dict]:
     """Fetch a YouTube transcript with a hard timeout.
 
-    youtube-transcript-api v0.x has no native timeout option. We run the call
-    in a worker thread and bail out after `timeout` seconds. The worker thread
-    is intentionally not joined on timeout — it leaks until the underlying
-    HTTP call returns, but that is preferable to wedging the request thread.
+    youtube-transcript-api v1.x has no native request timeout, so we run the
+    call in a worker thread and bail out after `timeout` seconds. The worker
+    thread is intentionally not joined on timeout — it leaks until the
+    underlying HTTP call returns, but that is preferable to wedging the
+    request thread.
     """
+    def _run() -> list[dict]:
+        return YouTubeTranscriptApi().fetch(video_id).to_raw_data()
+
     executor = ThreadPoolExecutor(max_workers=1)
     try:
-        future = executor.submit(YouTubeTranscriptApi.get_transcript, video_id)
+        future = executor.submit(_run)
         try:
             return future.result(timeout=timeout)
         except FuturesTimeoutError as e:
@@ -111,42 +106,44 @@ def _fetch_transcript(video_id: str, timeout: float = TRANSCRIPT_TIMEOUT_S) -> l
         executor.shutdown(wait=False)
 
 
-class OpenAIRecipeGenerator:
-    def __init__(self, api_key: str, model: str = 'gpt-4o-mini', timeout: float = OPENAI_TIMEOUT_S):
-        self._client = OpenAI(api_key=api_key, timeout=timeout)
+class AnthropicRecipeGenerator:
+    def __init__(self, api_key: str, model: str = 'claude-opus-4-7', timeout: float = ANTHROPIC_TIMEOUT_S):
+        self._client = anthropic.Anthropic(api_key=api_key, timeout=timeout)
         self._model = model
 
     def generate(self, video_id: str) -> GeneratedRecipe:
         try:
             transcript_entries = _fetch_transcript(video_id)
-        except (TranscriptsDisabled, NoTranscriptFound, VideoUnavailable) as e:
+        except CouldNotRetrieveTranscript as e:
             raise TranscriptUnavailable(str(e)) from e
 
         transcript_text = ' '.join(entry['text'] for entry in transcript_entries)
+        user_prompt = f'Generate a recipe from this video transcript:\n\n{transcript_text}'
 
         try:
-            response = self._client.chat.completions.create(
+            response = self._client.messages.parse(
                 model=self._model,
-                messages=[
-                    {'role': 'system', 'content': _SYSTEM_PROMPT},
-                    {'role': 'user', 'content': _PROMPT_TEMPLATE.format(transcript=transcript_text)},
-                ],
-                temperature=0.7,
-                response_format={'type': 'json_object'},
-                max_tokens=1500,
+                max_tokens=16000,
+                thinking={'type': 'adaptive'},
+                system=_SYSTEM_PROMPT,
+                messages=[{'role': 'user', 'content': user_prompt}],
+                output_format=RecipeSchema,
             )
-        except OpenAIError as e:
-            raise GenerationFailed(f'OpenAI request failed: {e}') from e
+        except anthropic.APIError as e:
+            raise GenerationFailed(f'Anthropic request failed: {e}') from e
 
-        raw = response.choices[0].message.content
-        try:
-            payload = json.loads(raw)
-        except json.JSONDecodeError as e:
-            raise GenerationFailed(f'Model returned non-JSON output: {e}') from e
+        if response.parsed_output is None:
+            raise GenerationFailed('Model did not return parseable output')
 
-        validate_payload(payload)
-        title = payload['data']['title']
-        return GeneratedRecipe(video_id=video_id, title=title, payload=payload)
+        recipe = response.parsed_output
+        if not recipe.data.title.strip():
+            raise GenerationFailed('Model returned an empty recipe title')
+
+        return GeneratedRecipe(
+            video_id=video_id,
+            title=recipe.data.title,
+            payload=recipe.model_dump(),
+        )
 
 
 class FakeRecipeGenerator:
@@ -189,12 +186,22 @@ class FakeRecipeGenerator:
 
 
 def default_generator() -> RecipeGenerator:
-    """Production wiring: read API key from the environment and return an OpenAI-backed generator.
+    """Pick an adapter based on environment.
 
-    Read lazily so that running `manage.py migrate` / tests does not require the key to be set.
+    - `USE_FAKE_GENERATOR=true` -> FakeRecipeGenerator (lets you run the site
+      end-to-end locally without an Anthropic key).
+    - `ANTHROPIC_API_KEY` set -> AnthropicRecipeGenerator (normal production path).
+    - Neither -> raise GenerationFailed so the view returns a 502.
+
+    Read lazily so `manage.py migrate` / tests don't require any of this.
     """
     import os
-    api_key = os.environ.get('OPENAI_API_KEY', '')
+    if os.environ.get('USE_FAKE_GENERATOR', '').lower() == 'true':
+        return FakeRecipeGenerator()
+    api_key = os.environ.get('ANTHROPIC_API_KEY', '')
     if not api_key:
-        raise GenerationFailed('OPENAI_API_KEY is not configured')
-    return OpenAIRecipeGenerator(api_key=api_key)
+        raise GenerationFailed(
+            'ANTHROPIC_API_KEY is not configured. '
+            'Set it in cookingai/.env, or set USE_FAKE_GENERATOR=true for local dev.'
+        )
+    return AnthropicRecipeGenerator(api_key=api_key)

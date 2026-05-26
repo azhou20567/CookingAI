@@ -10,8 +10,18 @@ from .generator import (
 from .models import Recipe
 
 
+# Video IDs surfaced in the home page's "Featured Examples" section.
+# Seed them with `python manage.py seed_examples`.
+EXAMPLE_VIDEO_IDS = ['2eCuSkRthq8', 'M8eeWdpqGo0', 'F2ENkOF3fMQ']
+
+
 def home_view(request):
-    return render(request, 'recipes/home.html', {'form': YoutubeLinkForm()})
+    by_id = {r.video_id: r for r in Recipe.objects.filter(video_id__in=EXAMPLE_VIDEO_IDS)}
+    examples = [by_id[vid] for vid in EXAMPLE_VIDEO_IDS if vid in by_id]
+    return render(request, 'recipes/home.html', {
+        'form': YoutubeLinkForm(),
+        'examples': examples,
+    })
 
 
 def youtube_form_view(request):

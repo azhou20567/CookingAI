@@ -7,7 +7,19 @@
       "Bash(xxd C:/Users/andre/CookingAI/cookingai/.env)",
       "Bash(python -m pip show django django-ai-assistant openai youtube-transcript-api beautifulsoup4 python-dotenv)",
       "Bash(python -m pip list)",
-      "Bash(git rm *)"
+      "Bash(git rm *)",
+      "Bash(python *)",
+      "Bash(.venv/Scripts/python.exe -c \"import youtube_transcript_api; print\\('version:', youtube_transcript_api.__version__ if hasattr\\(youtube_transcript_api, '__version__'\\) else 'unknown'\\); print\\('public exports:', [n for n in dir\\(youtube_transcript_api\\) if not n.startswith\\('_'\\)]\\)\")",
+      "Bash(.venv/Scripts/python.exe -c \"from importlib.metadata import version; print\\(version\\('youtube-transcript-api'\\)\\)\")",
+      "Bash(.venv/Scripts/python.exe -m pip install --upgrade \"youtube-transcript-api>=1.0,<2.0\")",
+      "Bash(.venv/Scripts/python.exe -c ' *)",
+      "Bash(../.venv/Scripts/python.exe manage.py test recipes)",
+      "Bash(C:/Users/andre/AppData/Local/Python/pythoncore-3.14-64/python.exe *)",
+      "Skill(claude-api)",
+      "Bash(.venv/Scripts/python.exe -m pip install -r requirements.txt)",
+      "Bash(../.venv/Scripts/python.exe manage.py migrate)",
+      "Bash(../.venv/Scripts/python.exe manage.py seed_examples)",
+      "Bash(../.venv/Scripts/python.exe -c ' *)"
     ]
   }
 }

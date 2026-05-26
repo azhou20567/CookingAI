@@ -1,18 +1,20 @@
-from unittest.mock import Mock
+import os
+from unittest.mock import Mock, patch
 
 from django.test import RequestFactory, TestCase
 from django.urls import reverse
 
 from recipes.forms import YoutubeLinkForm, extract_video_id
 from recipes.generator import (
+    AnthropicRecipeGenerator,
     FakeRecipeGenerator,
     GeneratedRecipe,
     GenerationFailed,
     TranscriptUnavailable,
-    validate_payload,
+    default_generator,
 )
 from recipes.models import Recipe
-from recipes.views import recipe_result_view
+from recipes.views import home_view, recipe_result_view, youtube_form_view
 
 
 VALID_ID = 'mhDJNfV7hjk'
@@ -83,47 +85,6 @@ class RecipeModelTests(TestCase):
         self.assertEqual(list(Recipe.objects.all()), [newer, older])
 
 
-class ValidatePayloadTests(TestCase):
-    def _valid(self):
-        return {
-            'data': {'title': 'X', 'source': '', 'servings': '', 'prep_time': '', 'cook_time': '', 'cuisine': ''},
-            'ingredients': [],
-            'instructions': [],
-            'notes': {},
-        }
-
-    def test_accepts_well_formed_payload(self):
-        validate_payload(self._valid())  # does not raise
-
-    def test_rejects_non_dict(self):
-        with self.assertRaises(GenerationFailed):
-            validate_payload(['not', 'a', 'dict'])
-
-    def test_rejects_missing_data(self):
-        payload = self._valid()
-        del payload['data']
-        with self.assertRaises(GenerationFailed):
-            validate_payload(payload)
-
-    def test_rejects_empty_title(self):
-        payload = self._valid()
-        payload['data']['title'] = ''
-        with self.assertRaises(GenerationFailed):
-            validate_payload(payload)
-
-    def test_rejects_non_list_ingredients(self):
-        payload = self._valid()
-        payload['ingredients'] = {'not': 'a list'}
-        with self.assertRaises(GenerationFailed):
-            validate_payload(payload)
-
-    def test_rejects_non_list_instructions(self):
-        payload = self._valid()
-        payload['instructions'] = None
-        with self.assertRaises(GenerationFailed):
-            validate_payload(payload)
-
-
 class FakeRecipeGeneratorTests(TestCase):
     def test_default_returns_canned_recipe(self):
         gen = FakeRecipeGenerator()
@@ -149,18 +110,28 @@ class FakeRecipeGeneratorTests(TestCase):
 
 
 class HomeViewTests(TestCase):
+    # Tests that render templates call views directly via RequestFactory rather
+    # than self.client. Reason: Django's test client instruments template
+    # rendering by calling copy.copy() on the Context, which breaks under
+    # Python 3.14 + Django 5.1 (Context.__copy__ assumes the parent copy
+    # supports attribute assignment, which 3.14 no longer guarantees).
     def test_renders_form(self):
-        response = self.client.get(reverse('home'))
+        request = RequestFactory().get(reverse('home'))
+        response = home_view(request)
         self.assertEqual(response.status_code, 200)
-        self.assertContains(response, 'youtube_link')
+        self.assertIn('youtube_link', response.content.decode())
 
 
 class YoutubeFormViewTests(TestCase):
+    def setUp(self):
+        self.factory = RequestFactory()
+
     def test_get_renders_form(self):
-        response = self.client.get(reverse('youtube_form'))
+        response = youtube_form_view(self.factory.get(reverse('youtube_form')))
         self.assertEqual(response.status_code, 200)
 
     def test_post_valid_redirects_to_result(self):
+        # Redirects don't render templates, so the test client works here.
         response = self.client.post(
             reverse('youtube_form'),
             {'youtube_link': f'https://www.youtube.com/watch?v={VALID_ID}'},
@@ -172,9 +143,13 @@ class YoutubeFormViewTests(TestCase):
         )
 
     def test_post_invalid_rerenders_form_with_error(self):
-        response = self.client.post(reverse('youtube_form'), {'youtube_link': 'https://example.com/foo'})
+        request = self.factory.post(
+            reverse('youtube_form'),
+            {'youtube_link': 'https://example.com/foo'},
+        )
+        response = youtube_form_view(request)
         self.assertEqual(response.status_code, 200)
-        self.assertContains(response, 'valid YouTube URL')
+        self.assertIn('valid YouTube URL', response.content.decode())
 
 
 class RecipeResultViewTests(TestCase):
@@ -226,6 +201,19 @@ class RecipeResultViewTests(TestCase):
         self.assertContains(response, 'Recipe generation failed', status_code=502)
         self.assertFalse(Recipe.objects.filter(video_id=VALID_ID).exists())
 
+    def test_default_generator_used_when_no_argument_passed(self):
+        """With USE_FAKE_GENERATOR=true, hitting /results/<id>/ uses the fake
+        adapter automatically — no `generator` kwarg needed. This is the path
+        the live runserver exercises when started without an OpenAI key.
+        """
+        env_overrides = {'USE_FAKE_GENERATOR': 'true', 'ANTHROPIC_API_KEY': ''}
+        with patch.dict(os.environ, env_overrides, clear=False):
+            response = recipe_result_view(self._request(), VALID_ID)
+
+        self.assertEqual(response.status_code, 200)
+        recipe = Recipe.objects.get(video_id=VALID_ID)
+        self.assertEqual(recipe.title, 'Fake Test Recipe')
+
     def test_race_recipe_created_during_generation_does_not_crash(self):
         """Simulates a concurrent request that wins the create race.
 
@@ -249,3 +237,69 @@ class RecipeResultViewTests(TestCase):
         self.assertEqual(Recipe.objects.filter(video_id=VALID_ID).count(), 1)
         # The racing-request's row wins — get_or_create returned the existing one
         self.assertEqual(Recipe.objects.get(video_id=VALID_ID).title, 'Racing')
+
+
+class DefaultGeneratorTests(TestCase):
+    """Verify default_generator()'s dispatch on environment variables.
+
+    These cover the wiring that lets the site run locally without OpenAI.
+    """
+
+    def test_use_fake_flag_returns_fake_generator(self):
+        with patch.dict(os.environ, {'USE_FAKE_GENERATOR': 'true', 'ANTHROPIC_API_KEY': ''}, clear=False):
+            gen = default_generator()
+        self.assertIsInstance(gen, FakeRecipeGenerator)
+
+    def test_use_fake_flag_is_case_insensitive(self):
+        with patch.dict(os.environ, {'USE_FAKE_GENERATOR': 'TRUE', 'ANTHROPIC_API_KEY': ''}, clear=False):
+            gen = default_generator()
+        self.assertIsInstance(gen, FakeRecipeGenerator)
+
+    def test_api_key_set_returns_anthropic_generator(self):
+        with patch.dict(os.environ, {'USE_FAKE_GENERATOR': '', 'ANTHROPIC_API_KEY': 'sk-ant-test'}, clear=False):
+            gen = default_generator()
+        self.assertIsInstance(gen, AnthropicRecipeGenerator)
+
+    def test_fake_flag_wins_over_real_key(self):
+        # Both set: fake flag takes precedence so devs can shadow prod creds locally.
+        with patch.dict(os.environ, {'USE_FAKE_GENERATOR': 'true', 'ANTHROPIC_API_KEY': 'sk-ant-test'}, clear=False):
+            gen = default_generator()
+        self.assertIsInstance(gen, FakeRecipeGenerator)
+
+    def test_no_config_raises_generation_failed(self):
+        with patch.dict(os.environ, {'USE_FAKE_GENERATOR': '', 'ANTHROPIC_API_KEY': ''}, clear=False):
+            with self.assertRaises(GenerationFailed):
+                default_generator()
+
+
+class LocalDevSmokeTests(TestCase):
+    """End-to-end walk of the local-run flow: home -> submit -> result.
+
+    Mirrors what a developer does after `python manage.py runserver` with
+    USE_FAKE_GENERATOR=true: visit /, paste any YouTube URL, see a recipe.
+    """
+
+    def setUp(self):
+        self.factory = RequestFactory()
+
+    def test_full_flow_with_fake_generator(self):
+        with patch.dict(os.environ, {'USE_FAKE_GENERATOR': 'true', 'ANTHROPIC_API_KEY': ''}, clear=False):
+            home_response = home_view(self.factory.get(reverse('home')))
+            self.assertEqual(home_response.status_code, 200)
+            self.assertIn('youtube_link', home_response.content.decode())
+
+            submit_response = youtube_form_view(self.factory.post(
+                reverse('youtube_form'),
+                {'youtube_link': f'https://www.youtube.com/watch?v={VALID_ID}'},
+            ))
+            self.assertEqual(submit_response.status_code, 302)
+            self.assertEqual(submit_response.url, reverse('recipe_result', args=[VALID_ID]))
+
+            # No generator kwarg — exercises default_generator() against the env flag.
+            result_response = recipe_result_view(
+                self.factory.get(submit_response.url),
+                VALID_ID,
+            )
+            self.assertEqual(result_response.status_code, 200)
+            self.assertIn('Fake Test Recipe', result_response.content.decode())
+            self.assertTrue(Recipe.objects.filter(video_id=VALID_ID).exists())
