@@ -16,3 +16,21 @@ class Recipe(models.Model):
     @property
     def youtube_url(self):
         return f'https://www.youtube.com/watch?v={self.video_id}'
+
+
+class GlobalUsage(models.Model):
+    """Total successful Anthropic-incurring generations within a given period.
+
+    Hard cap that stops the app from making API calls once the monthly limit is
+    reached. Per-IP rate limits are a softer defense (defeatable by IP rotation);
+    this is the floor that bounds the bill regardless.
+    """
+    period_key = models.CharField(max_length=20, unique=True)  # "YYYY-MM"
+    count = models.IntegerField(default=0)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-period_key']
+
+    def __str__(self):
+        return f'{self.period_key}: {self.count}'

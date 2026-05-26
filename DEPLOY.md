@@ -1,6 +1,13 @@
 # Deployment — Render + Neon (Free Tier)
 
-Target audience: a portfolio piece. Public URL, anyone can browse and submit a YouTube URL, but rate-limited so a single bad actor can't drain your wallet. Total cost ceiling: **$5/month** (capped at Anthropic; Render and Neon stay at $0 indefinitely).
+Target audience: a portfolio piece. Public URL, anyone can browse and submit a YouTube URL, with two layers of defense so a single bad actor can't drain your wallet:
+
+- **Per-IP rate limit** — 3 generations/day/IP. Stops casual abuse from a single visitor.
+- **Global monthly cap** — 30 generations/month total across all IPs combined. At ~$0.15 worst-case per call, this caps the API bill at ~$4.50/month even under coordinated IP rotation.
+
+Anthropic does not currently offer an organization-level hard spend cap, so the global cap is implemented in the app itself (the `GlobalUsage` model counts successful generations per month; the 31st hits the `budget_exhausted` 503 page).
+
+Render and Neon free tiers stay at $0 indefinitely.
 
 Expect a 30-second cold start after 15 minutes of idle — fine for portfolio traffic, awkward for live demos. (For a live demo, hit the URL ~60s before you start.)
 
@@ -8,20 +15,9 @@ Expect a 30-second cold start after 15 minutes of idle — fine for portfolio tr
 
 ## Manual steps
 
-Do these in order. Steps 1–7 are required; step 8 is optional.
+Do these in order. Steps 1–6 are required; step 7 is optional.
 
-### 1. Cap your Anthropic spend at $5/month
-
-Before anything else — this is the floor that protects you if everything else fails.
-
-1. Open <https://console.anthropic.com/settings/limits>.
-2. Set **Monthly spend limit** to `$5.00`.
-3. Set the **Alert threshold** to `$4.00` (so you get an email before you hit the cap).
-4. Save.
-
-Once you hit $5 in a month, the Anthropic API returns a quota error. Your view already maps that to the 502 error page (no stack trace, no surprise bill).
-
-### 2. Push the repo to GitHub
+### 1. Push the repo to GitHub
 
 If it's not already there:
 
@@ -31,7 +27,7 @@ gh repo create CookingAI --public --source=. --push
 
 Or use the GitHub website UI to create the repo and push manually. **Verify `cookingai/.env` and `cookingai/db.sqlite3` are NOT in the commit** — both are gitignored, but double-check `git status` on the first push.
 
-### 3. Generate a production SECRET_KEY
+### 2. Generate a production SECRET_KEY
 
 Run this locally and copy the output — you'll paste it into Render in step 6:
 
@@ -41,7 +37,7 @@ python -c "from secrets import token_urlsafe; print(token_urlsafe(50))"
 
 **Do not reuse** the `django-insecure-…` value from your local `.env`. That string is in your shell history and any backups; treat it as compromised for production purposes.
 
-### 4. Create the Neon Postgres database
+### 3. Create the Neon Postgres database
 
 1. Sign up at <https://neon.tech> (no credit card required for free tier).
 2. Click **New project**. Name it `cookingai`. Pick a region geographically close to Render's region (e.g. both `us-east`).
@@ -53,7 +49,7 @@ python -c "from secrets import token_urlsafe; print(token_urlsafe(50))"
 
 Free tier limits: 0.5 GB storage, 191 compute hours/month. The recipe app uses kilobytes per recipe, so storage is a non-issue.
 
-### 5. Create the Render web service
+### 4. Create the Render web service
 
 1. Sign up at <https://render.com> (GitHub auth recommended).
 2. **New → Web Service**.
@@ -73,24 +69,26 @@ Free tier limits: 0.5 GB storage, 191 compute hours/month. The recipe app uses k
      gunicorn --chdir cookingai cookingai.wsgi
      ```
    - **Instance Type**: `Free`
-5. **Do not click Deploy yet** — finish step 6 first, otherwise the first deploy fails.
+5. **Do not click Deploy yet** — finish step 5 first, otherwise the first deploy fails.
 
-### 6. Set environment variables in Render
+### 5. Set environment variables in Render
 
 In the same Render service page, scroll to **Environment Variables** and add:
 
-| Key | Value |
-|---|---|
-| `SECRET_KEY` | (the string from step 3) |
-| `ANTHROPIC_API_KEY` | (your real Anthropic key, starts with `sk-ant-`) |
-| `DATABASE_URL` | (the Neon connection string from step 4) |
-| `ALLOWED_HOSTS` | `cookingai.onrender.com` (or whatever your actual Render URL is) |
-| `DEBUG` | `false` |
-| `USE_FAKE_GENERATOR` | `false` |
+| Key | Value | Notes |
+|---|---|---|
+| `SECRET_KEY` | (the string from step 2) | |
+| `ANTHROPIC_API_KEY` | (your real Anthropic key, `sk-ant-...`) | |
+| `DATABASE_URL` | (the Neon connection string from step 3) | |
+| `ALLOWED_HOSTS` | `cookingai.onrender.com` (your actual Render URL) | |
+| `DEBUG` | `false` | |
+| `USE_FAKE_GENERATOR` | `false` | |
+| `MONTHLY_GENERATION_CAP` | `30` | **Bill ceiling.** Once this many successful generations happen in a calendar month, the app returns a 503 "budget exhausted" page until the 1st. At ~$0.15 worst-case per generation, 30 ≈ $4.50/mo. Lower it if you want a tighter budget. |
+| `RATELIMIT_ENABLE` | `true` | (default — set explicitly so it's obvious in the UI) |
 
 Click **Create Web Service**. The first deploy will start.
 
-### 7. Verify
+### 6. Verify
 
 1. Watch the build log in Render. Expected sequence: `pip install` → `collectstatic` → `migrate` → `seed_examples` (this last step makes 3 Anthropic API calls, ~$0.50 total — one-time). First deploy takes 5–8 minutes.
 2. Once build shows `Live`, visit `https://cookingai.onrender.com`. The home page should load and the three Featured Examples should be visible.
@@ -100,7 +98,7 @@ Click **Create Web Service**. The first deploy will start.
 
 If any of these fail, see **Troubleshooting** below.
 
-### 8. (Optional) Custom domain
+### 7. (Optional) Custom domain
 
 Skip if `cookingai.onrender.com` is fine.
 
@@ -117,7 +115,8 @@ Skip if `cookingai.onrender.com` is fine.
 - **Migrations run on every deploy** (in the build command). Idempotent — Django only applies pending ones.
 - **Example recipes are seeded once** by `seed_examples`. The command is idempotent — subsequent deploys see them already cached and skip the API calls.
 - **Static files are served by WhiteNoise** baked into Django. No separate CDN needed.
-- **Rate limiting**: 3 recipe generations per IP per day. Anyone exceeding it sees a 429 page until midnight UTC. Cached recipes (the 3 examples and anything previously generated) load freely.
+- **Per-IP rate limit**: 3 recipe generations per IP per day. Anyone exceeding it sees a 429 page until midnight UTC. Cached recipes (the 3 examples and anything previously generated) load freely.
+- **Global monthly cap**: `MONTHLY_GENERATION_CAP` total successful generations per month across all IPs. Counted in the DB via the `GlobalUsage` model, so the count survives worker restarts. Once hit, the app returns a 503 "budget exhausted" page until the 1st of next month. Browsable on the cached recipes page. Inspectable via Django admin under `Recipes → Global usages`. Reset early if needed by deleting the current row in admin.
 - **HTTPS** is provisioned by Render automatically — no certs to manage.
 - **Logs** are visible in Render's dashboard → your service → Logs tab.
 
@@ -132,8 +131,9 @@ Skip if `cookingai.onrender.com` is fine.
 | Build fails on `seed_examples` | `ANTHROPIC_API_KEY` not set or invalid | Check the env var; regenerate the key if needed |
 | Home page returns "DisallowedHost" | `ALLOWED_HOSTS` doesn't include your URL | Add the Render domain to the env var (comma-separated if multiple) |
 | Site loads but no examples shown | First deploy hadn't run `seed_examples` yet | Trigger a manual redeploy from Render's dashboard |
-| 502 on every recipe submit | `ANTHROPIC_API_KEY` wrong, or you hit the $5 cap | Check the key, check Anthropic Console usage |
-| 429 on first submission | Rate limit triggered before you tested | Wait until midnight UTC, or raise the limit (in code — ask Claude) |
+| 502 on every recipe submit | `ANTHROPIC_API_KEY` wrong or invalid | Check the key in Render env vars; regenerate if needed |
+| 503 "Demo budget exhausted" too soon | `MONTHLY_GENERATION_CAP` too low, or counter not reset | In admin → Global usages, delete the current month's row to reset (or raise the env var) |
+| 429 on first submission | Rate limit triggered before you tested | Wait until midnight UTC, or raise the rate in `recipes/views.py` (`GENERATION_RATE`) |
 | Cold start every visit | Free tier sleeps after 15 min idle | Expected. Upgrade to Render Starter ($7/mo) to eliminate. |
 
 ---
@@ -144,12 +144,13 @@ Skip if `cookingai.onrender.com` is fine.
 |---|---|---|
 | **Render web** | 750 hrs/mo, sleeps after 15 min idle, 30s cold start | Starter $7/mo (no sleep) |
 | **Neon Postgres** | 0.5 GB storage, 191 compute hrs/mo | Launch $19/mo |
-| **Anthropic API** | Capped at $5/mo per your spending limit (step 1) | You set the cap |
-| **Total maximum** | **$5/month** | |
+| **Anthropic API** | Capped in-app by `MONTHLY_GENERATION_CAP` (30 by default → ≤ $5/mo) | You raise the env var |
+
+**Worst case bill at default settings: ~$5/month.** That's the global generation cap × the worst-case per-call cost.
 
 If you start seeing serious traffic, the upgrade order is:
-1. Raise Anthropic cap (~$10–20/mo for ~100 generations/day)
+1. Raise `MONTHLY_GENERATION_CAP` (e.g. 200/mo ≈ $30/mo)
 2. Render Starter (eliminate cold starts) — $7/mo
 3. Neon Launch (more compute hours) — $19/mo
 
-You will not accidentally cross any of these thresholds — both Render and Neon require an explicit plan upgrade in their UIs.
+Render and Neon require an explicit plan upgrade in their UIs — you can't accidentally cross those thresholds. The Anthropic spend is bounded by the app's `MONTHLY_GENERATION_CAP`, which is just an env var — set it carefully if you raise it.

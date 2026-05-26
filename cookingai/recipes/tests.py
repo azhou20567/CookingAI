@@ -14,7 +14,7 @@ from recipes.generator import (
     TranscriptUnavailable,
     default_generator,
 )
-from recipes.models import Recipe
+from recipes.models import GlobalUsage, Recipe
 from recipes.views import home_view, recipe_result_view, youtube_form_view
 
 
@@ -306,6 +306,92 @@ class LocalDevSmokeTests(TestCase):
             self.assertEqual(result_response.status_code, 200)
             self.assertIn('Fake Test Recipe', result_response.content.decode())
             self.assertTrue(Recipe.objects.filter(video_id=VALID_ID).exists())
+
+
+@override_settings(RATELIMIT_ENABLE=False)
+class GlobalUsageCapTests(TestCase):
+    """Verify the monthly global cap (defends API bill even under IP rotation).
+
+    Per-IP rate limiting is disabled here so we isolate the global cap behavior.
+    """
+
+    def setUp(self):
+        self.factory = RequestFactory()
+        # Import here so test patches the module-level constant.
+        from recipes import views
+        self.views = views
+        # Cap to a low number for fast tests.
+        self._cap_patcher = patch.object(views, 'MONTHLY_GENERATION_CAP', 2)
+        self._cap_patcher.start()
+
+    def tearDown(self):
+        self._cap_patcher.stop()
+
+    def _request(self, video_id):
+        return self.factory.get(f'/results/{video_id}/')
+
+    def _current_period(self):
+        return self.views._current_period()
+
+    def test_under_cap_allows_generation_and_increments(self):
+        self.assertEqual(GlobalUsage.objects.filter(period_key=self._current_period()).count(), 0)
+
+        response = self.views.recipe_result_view(
+            self._request('aaaaaaaaaaa'), 'aaaaaaaaaaa', generator=FakeRecipeGenerator(),
+        )
+        self.assertEqual(response.status_code, 200)
+
+        usage = GlobalUsage.objects.get(period_key=self._current_period())
+        self.assertEqual(usage.count, 1)
+
+    def test_at_cap_blocks_with_503_and_does_not_increment(self):
+        GlobalUsage.objects.create(period_key=self._current_period(), count=2)
+
+        response = self.views.recipe_result_view(
+            self._request('aaaaaaaaaaa'), 'aaaaaaaaaaa', generator=FakeRecipeGenerator(),
+        )
+        self.assertEqual(response.status_code, 503)
+        self.assertContains(response, 'Demo budget exhausted', status_code=503)
+
+        usage = GlobalUsage.objects.get(period_key=self._current_period())
+        self.assertEqual(usage.count, 2)  # not bumped past the cap
+        self.assertFalse(Recipe.objects.filter(video_id='aaaaaaaaaaa').exists())
+
+    def test_transcript_unavailable_does_not_increment_usage(self):
+        # Transcript fetch fails locally — no Anthropic call, no cost, no count.
+        response = self.views.recipe_result_view(
+            self._request('aaaaaaaaaaa'),
+            'aaaaaaaaaaa',
+            generator=FakeRecipeGenerator(raises=TranscriptUnavailable('no captions')),
+        )
+        self.assertEqual(response.status_code, 422)
+        self.assertFalse(GlobalUsage.objects.filter(period_key=self._current_period()).exists())
+
+    def test_generation_failed_still_increments_usage(self):
+        # The Anthropic call happened and burned tokens, even though it returned garbage.
+        response = self.views.recipe_result_view(
+            self._request('aaaaaaaaaaa'),
+            'aaaaaaaaaaa',
+            generator=FakeRecipeGenerator(raises=GenerationFailed('bad json')),
+        )
+        self.assertEqual(response.status_code, 502)
+
+        usage = GlobalUsage.objects.get(period_key=self._current_period())
+        self.assertEqual(usage.count, 1)
+
+    def test_cache_hits_do_not_count_against_global_cap(self):
+        Recipe.objects.create(
+            video_id=VALID_ID,
+            title='Cached',
+            payload=FakeRecipeGenerator.DEFAULT_PAYLOAD,
+        )
+        for _ in range(10):
+            response = self.views.recipe_result_view(
+                self._request(VALID_ID), VALID_ID, generator=FakeRecipeGenerator(),
+            )
+            self.assertEqual(response.status_code, 200)
+        # No GlobalUsage row created at all — the increment path is bypassed for hits.
+        self.assertFalse(GlobalUsage.objects.filter(period_key=self._current_period()).exists())
 
 
 class RateLimitTests(TestCase):

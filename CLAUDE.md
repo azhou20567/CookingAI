@@ -29,6 +29,7 @@ Set `USE_FAKE_GENERATOR=true` in `cookingai/.env`. `default_generator()` will re
 
 - **`SECRET_KEY`** (required) — Django will refuse to start without it (intentional, `os.environ['SECRET_KEY']`).
 - **`ANTHROPIC_API_KEY`** (required for generation only) — read lazily inside `default_generator()`. Tests and `manage.py migrate` run fine without it; only an actual cache-miss request will raise `GenerationFailed('ANTHROPIC_API_KEY is not configured')`.
+- **`MONTHLY_GENERATION_CAP`** (optional, default `30`) — hard upper bound on successful generations per calendar month across all IPs. Stops the app from making any further Anthropic calls once hit. Counted in the `GlobalUsage` model so it survives worker restarts. Anthropic has no organization-level hard spend cap, so this is the bill-floor — at ~$0.15 worst-case per generation, 30 ≈ $5/mo.
 - **`DEBUG`** (optional, default `true`) — set to `false` for prod.
 - **`ALLOWED_HOSTS`** (optional, default `127.0.0.1,localhost`) — comma-separated.
 
@@ -68,6 +69,8 @@ Both errors derive from `GeneratorError`. If you add a new failure mode, raise a
 **Transcript errors.** `_fetch_transcript` catches `CouldNotRetrieveTranscript`, the base class for every v1.x transcript failure (TranscriptsDisabled, NoTranscriptFound, VideoUnavailable, RequestBlocked, IpBlocked, AgeRestricted, etc.). All map to `TranscriptUnavailable` → 422 in the view.
 
 **Cache writes use `get_or_create`.** Two concurrent requests for the same `video_id` both miss the cache and both call OpenAI; whichever finishes first wins, the loser's `get_or_create` returns the existing row instead of crashing on the `unique=True` constraint.
+
+**Two-layer abuse defense.** Per-IP rate limit (`django-ratelimit`, 3/day) plus a global monthly cap (`GlobalUsage` model) checked in `recipe_result_view` before generation. The cap is incremented only on outcomes that actually burn API tokens — successful generation OR `GenerationFailed` (the LLM call happened but returned garbage). `TranscriptUnavailable` is a local failure (transcript fetch), so it doesn't count. Both defenses live in the cache-miss path; cached recipes bypass them entirely.
 
 ### Recipe model
 
