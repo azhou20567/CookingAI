@@ -4,41 +4,79 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project overview
 
-CookingAI is a Django 5.1 web app that turns a YouTube cooking video into a structured JSON recipe. The user submits a YouTube URL; the backend pulls the transcript via `youtube_transcript_api` and asks OpenAI (`gpt-4o-mini`) to convert it into a recipe with ingredients, steps, and notes, which is then rendered with Bootstrap.
+CookingAI is a Django 5.1 web app that turns a YouTube cooking video into a structured JSON recipe. The user submits a YouTube URL; the backend pulls the transcript via `youtube_transcript_api` and asks OpenAI (`gpt-4o-mini`) to convert it into a recipe with ingredients, steps, and notes, which is then rendered with Bootstrap. Generated recipes are cached in the database keyed by `video_id`, so repeat requests don't re-hit OpenAI.
 
 ## Running the app
 
-All `manage.py` commands must be run from the inner `cookingai/` directory (the one that contains `manage.py`), not the repo root:
+All `manage.py` commands run from the inner `cookingai/` directory (the one that contains `manage.py`), not the repo root:
 
 ```powershell
 cd cookingai
-python manage.py runserver        # dev server at http://127.0.0.1:8000/
-python manage.py migrate          # apply migrations (SQLite db.sqlite3 is committed)
-python manage.py createsuperuser  # for /admin/
+python manage.py migrate           # apply migrations (recipes app)
+python manage.py runserver         # dev server at http://127.0.0.1:8000/
+python manage.py createsuperuser   # for /admin/
 ```
 
-Install dependencies with `pip install -r requirements.txt` (from the repo root). Note `youtube-transcript-api` is pinned to `<1.0` because the code uses the v0.x `YouTubeTranscriptApi.get_transcript(...)` class-method API, which v1.x removed.
+Install dependencies with `pip install -r requirements.txt` (from the repo root). `youtube-transcript-api` is pinned to `<1.0` because the code uses the v0.x `YouTubeTranscriptApi.get_transcript(...)` class-method API.
 
-## Required secrets
+## Configuration
 
-`settings.py` reads `SECRET_KEY` and `OPENAI_API_KEY` from the environment via `python-dotenv`, loading `cookingai/.env` (i.e. next to `manage.py`) at import time. The file is gitignored and ships with empty values — fill them in locally before running. Missing keys raise `KeyError` on startup (intentional — better than a silent fallback).
+`cookingai/.env` (loaded by `python-dotenv` from `settings.py`) holds:
 
-## Tests
+- **`SECRET_KEY`** (required) — Django will refuse to start without it (intentional, `os.environ['SECRET_KEY']`).
+- **`OPENAI_API_KEY`** (required for generation only) — read lazily inside `default_generator()`. Tests and `manage.py migrate` run fine without it; only an actual cache-miss request will raise `GenerationFailed('OPENAI_API_KEY is not configured')`.
+- **`DEBUG`** (optional, default `true`) — set to `false` for prod.
+- **`ALLOWED_HOSTS`** (optional, default `127.0.0.1,localhost`) — comma-separated.
 
-There is no Django test suite. The `test/` directory at the repo root is **not** Django tests — it contains two unrelated scratch scripts (`AITest.mjs`, `webscraper.py`) that predate the Django app and exist only as references for the OpenAI / transcript-scraping APIs. `python manage.py test` will find nothing.
+For prod deploys: set `DEBUG=false`, set `ALLOWED_HOSTS=yourdomain.com`, run `python manage.py collectstatic` (writes to `cookingai/staticfiles/`, gitignored).
 
 ## Architecture
 
-The project has an unusual layout: the Django **project** and its only **app** are both named `cookingai` and live in the same `cookingai/cookingai/` directory. There is no separate app package — views, forms, templates, URLs, and the AI assistant all live alongside `settings.py`. `INSTALLED_APPS` lists `'cookingai'` as an app even though it's also the project root.
+Two packages live under `cookingai/`:
 
-Request flow:
+- **`cookingai/`** — Django project package: `settings.py`, root `urls.py`, asgi/wsgi. No app code.
+- **`recipes/`** — the only Django app. Holds `models.py` (`Recipe`), `views.py`, `forms.py`, `urls.py`, `admin.py`, the AI `generator.py`, templates, and static files.
 
-1. `urls.py` routes `/` → `home_view`, `/youtube/` → `youtube_form_view`, `/results/<video_id>/` → `recipe_result_view`.
-2. `home.html` posts the URL directly to `/youtube/`. `youtube_form_view` validates with `forms.youtubeLinkForm`, extracts the `v=` parameter as `video_id`, and **redirects** to `/results/<video_id>/`. The video_id parsing in the view is naive (`url.split('v=')[1].split('&')[0]`) and only handles standard `watch?v=...` URLs — the regex in `forms.py` accepts more shapes than the view can handle.
-3. `recipe_result_view` instantiates `CookingAIAssistant` and calls `generate_recipe(youtube_url)` **synchronously on the request thread**. This means a page load blocks on both the YouTube transcript fetch and the OpenAI call — expect multi-second response times and HTTP timeouts on long videos.
+### Request flow
 
-`ai_assistants.py` subclasses `django_ai_assistant.AIAssistant` but largely bypasses the framework: `generate_recipe` directly instantiates an `openai.OpenAI` client and calls `chat.completions.create` with `response_format={"type": "json_object"}` and a hand-crafted prompt in `_build_prompt`. The `@method_tool` decorator and `youtubeInput` schema are declared but the method is invoked as a plain method, not via the assistant's tool-dispatch loop. If you're modifying recipe generation, edit `_build_prompt` and the response-parsing in `generate_recipe` together — the template (`recipe_result.html`) assumes the exact JSON shape declared in that prompt (`data`, `ingredients[]`, `instructions[]`, `notes`).
+1. Root `urls.py` includes `recipes.urls`, which routes `/` → `home_view`, `/youtube/` → `youtube_form_view`, `/results/<video_id>/` → `recipe_result_view`.
+2. `YoutubeLinkForm.clean_youtube_link` runs the regex and stores the extracted `video_id` on `cleaned_data['video_id']` — **single source of truth for ID extraction**. The view never parses the URL itself.
+3. `recipe_result_view` does **read-through caching**: looks up `Recipe.objects.get(video_id=...)`, and on a miss calls the injected `RecipeGenerator`, persists the result, then renders.
+4. Generator errors are mapped to a user-visible `recipes/error.html` (HTTP 422 for transcript issues, 502 for OpenAI/JSON failures) — not raw tracebacks.
 
-## Templates
+### The generator seam (`recipes/generator.py`)
 
-Templates live in `cookingai/cookingai/templates/cookingai/` and use Bootstrap 5.3 from a CDN. `home.html` is a single ~500-line file containing the entire landing page with inline CSS. Despite the `8136555 frontend basics finishing touches` and `879bc53 added react` commits, **there is no React, no build step, and no `package.json`** — everything is server-rendered Django templates.
+`RecipeGenerator` is a `Protocol` with one method: `generate(video_id) -> GeneratedRecipe`. Two adapters satisfy it:
+
+- `OpenAIRecipeGenerator` — fetches transcript, calls OpenAI with `response_format=json_object`, validates the payload shape via `validate_payload`, raises `TranscriptUnavailable` or `GenerationFailed` on known error modes.
+- `FakeRecipeGenerator` — returns a canned recipe (or raises a configured exception) for tests and offline dev. **Do not mock OpenAI in tests; inject this instead.**
+
+`recipe_result_view` takes `generator` as a kwarg defaulting to `default_generator()`. Tests should pass a `FakeRecipeGenerator()` to exercise the view without network.
+
+Both errors derive from `GeneratorError`. If you add a new failure mode, raise a new subclass and add a branch to the view's `except` chain — don't swallow exceptions in the generator.
+
+**Timeouts.** OpenAI is configured with a 30s timeout. `YouTubeTranscriptApi.get_transcript` has no native timeout in v0.x, so `_fetch_transcript` runs it in a `ThreadPoolExecutor` and bails out at 30s — the worker thread is intentionally not joined on timeout (leaks until the HTTP call returns) since wedging the request thread is worse. If you upgrade to `youtube-transcript-api>=1.0` you can replace this with native timeout config.
+
+**Cache writes use `get_or_create`.** Two concurrent requests for the same `video_id` both miss the cache and both call OpenAI; whichever finishes first wins, the loser's `get_or_create` returns the existing row instead of crashing on the `unique=True` constraint.
+
+### Recipe model
+
+`Recipe(video_id unique, title, payload JSONField, created_at)`. The full LLM JSON output lives in `payload`; the template (`recipe_result.html`) reads `recipe.payload` (passed as `recipe` in the context). `title` is denormalized for admin display.
+
+### Templates and static files
+
+All templates extend `recipes/templates/recipes/base.html`, which provides only `<head>` (with `{% block title %}` and `{% block head_extra %}`) and a `{% block body %}` — pages bring their own chrome. The landing page (`home.html`) links its own stylesheet at `recipes/static/recipes/home.css`. Utility pages (`youtube_form.html`, `recipe_result.html`, `error.html`) pull Bootstrap from a CDN in `head_extra`.
+
+Static files are served via Django's app-dir finder (`django.contrib.staticfiles` + `STATIC_URL = 'static/'`); no `STATICFILES_DIRS` is configured because everything lives under `recipes/static/`.
+
+## Tests
+
+```powershell
+cd cookingai
+python manage.py test recipes        # whole suite
+python manage.py test recipes.tests.RecipeResultViewTests.test_cache_hit_skips_generator   # one test
+```
+
+The suite lives in `cookingai/recipes/tests.py`. It exercises the view directly with `RequestFactory` (not the test client) so it can inject a `FakeRecipeGenerator` via the view's `generator` kwarg — the URL dispatcher does not pass it. To test error paths, construct `FakeRecipeGenerator(raises=TranscriptUnavailable(...))` or `(raises=GenerationFailed(...))`. Do not mock the OpenAI SDK — that bypasses the seam.
+
+The `test/` directory at the repo root is **not** Django tests — it contains two unrelated scratch scripts (`AITest.mjs`, `webscraper.py`) that predate the Django app.

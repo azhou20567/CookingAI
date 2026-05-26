@@ -1,0 +1,150 @@
+{% extends "recipes/base.html" %}
+{% load static %}
+
+{% block title %}CookingAI - Video to Recipe Converter{% endblock %}
+
+{% block head_extra %}
+    <link rel="stylesheet" href="{% static 'recipes/home.css' %}">
+{% endblock %}
+
+{% block body %}
+    <header>
+        <div class="container header-container">
+            <div class="logo-container">
+                <div class="logo">CookingAI</div>
+            </div>
+            <nav>
+                <ul>
+                    <li><a href="#home">Home</a></li>
+                    <li><a href="#how-it-works">How It Works</a></li>
+                    <li><a href="#examples">Examples</a></li>
+                    <li><a href="#about">About</a></li>
+                    <li><a href="#contact">Contact</a></li>
+                </ul>
+            </nav>
+        </div>
+    </header>
+
+    <section class="hero" id="home">
+        <div class="container">
+            <h1>Transform Cooking Videos Into Recipes</h1>
+            <p>Our AI assistant analyzes cooking videos and creates detailed, step-by-step recipes with ingredients and instructions.</p>
+        </div>
+    </section>
+
+    <section class="main-content">
+        <div class="container">
+            <div class="url-input-container">
+                <h2>Convert Your Favorite Cooking Videos</h2>
+                <p>Simply paste a YouTube URL of a cooking video, and our AI will generate a complete recipe for you.</p>
+                <form class="url-form" id="url-form" method="post" action="{% url 'youtube_form' %}">
+                    {% csrf_token %}
+                    <div class="input-button-wrapper">
+                        {{ form.youtube_link }}
+                        <button type="submit" class="submit-btn">Convert to Recipe</button>
+                    </div>
+                    {% if form.youtube_link.errors %}
+                        <div class="form-error mt-2">
+                            {{ form.youtube_link.errors }}
+                        </div>
+                    {% endif %}
+                </form>
+            </div>
+
+            <div class="features" id="how-it-works">
+                <div class="feature-card">
+                    <div class="feature-icon">🔍</div>
+                    <h3>AI Video Analysis</h3>
+                    <p>Our AI watches the cooking video and identifies all the steps and ingredients used in the recipe.</p>
+                </div>
+                <div class="feature-card">
+                    <div class="feature-icon">📝</div>
+                    <h3>Complete Ingredient List</h3>
+                    <p>Get a detailed list of all ingredients with precise measurements extracted from the video.</p>
+                </div>
+                <div class="feature-card">
+                    <div class="feature-icon">📋</div>
+                    <h3>Step-by-Step Instructions</h3>
+                    <p>Follow clear, chronological cooking instructions derived from the video demonstration.</p>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <section class="example-section" id="examples">
+        <div class="container">
+            <h2>Featured Examples</h2>
+            <div class="examples-grid">
+                <div class="example-card">
+                    <div class="example-content">
+                        <h3>Classic Beef Stew</h3>
+                        <p>A hearty beef stew packed with vegetables and rich flavors, perfect for a cold day.</p>
+                        <a href="#" class="example-link">View Recipe</a>
+                    </div>
+                </div>
+                <div class="example-card">
+                    <div class="example-content">
+                        <h3>Thai Coconut Curry</h3>
+                        <p>A vibrant and spicy Thai curry with coconut milk, vegetables, and aromatic herbs.</p>
+                        <a href="#" class="example-link">View Recipe</a>
+                    </div>
+                </div>
+                <div class="example-card">
+                    <div class="example-content">
+                        <h3>Chocolate Lava Cake</h3>
+                        <p>Decadent chocolate cakes with a gooey molten center, ready in under 30 minutes.</p>
+                        <a href="#" class="example-link">View Recipe</a>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <section class="main-content" id="about">
+        <div class="container">
+            <div class="url-input-container">
+                <h2>About CookingAI</h2>
+                <p>CookingAI is an innovative tool that leverages artificial intelligence to bridge the gap between cooking videos and written recipes. Our mission is to make cooking more accessible by transforming visual cooking content into easy-to-follow written instructions.</p>
+                <p>Whether you're a beginner cook looking to learn new recipes or an experienced chef seeking inspiration, CookingAI helps you capture and recreate the delicious dishes you discover online.</p>
+            </div>
+        </div>
+    </section>
+
+    <footer id="contact">
+        <div class="container">
+            <div class="footer-container">
+                <div class="footer-section">
+                    <h3>CookingAI</h3>
+                    <p>Making cooking easier through AI-powered recipe conversion.</p>
+                </div>
+                <div class="footer-section">
+                    <h3>Quick Links</h3>
+                    <ul>
+                        <li><a href="#home">Home</a></li>
+                        <li><a href="#how-it-works">How It Works</a></li>
+                        <li><a href="#examples">Examples</a></li>
+                        <li><a href="#about">About</a></li>
+                    </ul>
+                </div>
+                <div class="footer-section">
+                    <h3>Support</h3>
+                    <ul>
+                        <li><a href="#">FAQs</a></li>
+                        <li><a href="#">Privacy Policy</a></li>
+                        <li><a href="#">Terms of Service</a></li>
+                    </ul>
+                </div>
+                <div class="footer-section">
+                    <h3>Contact Us</h3>
+                    <ul>
+                        <li><a href="mailto:azhou2056@gmail.com">azhou2056@gmail.com</a></li>
+                        <li><a href="#">(425) 589-2810</a></li>
+                    </ul>
+                </div>
+            </div>
+            <div class="copyright">
+                <p>&copy; 2025 CookingAI. All rights reserved.</p>
+            </div>
+        </div>
+    </footer>
+{% endblock %}
